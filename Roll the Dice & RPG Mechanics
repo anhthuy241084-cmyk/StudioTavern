@@ -1,0 +1,353 @@
+// ==UserScript==
+// @name         Google AI Studio: RPG Dice Master & Action Resolver
+// @namespace    http://tampermonkey.net/
+// @version      1.0.0
+// @description  Hệ thống xúc xắc D&D (D20, D100...) và phân định Thắng/Thua cưỡng chế cho Roleplay trên Google AI Studio.
+// @author       You & AI Assistant
+// @match        https://aistudio.google.com/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ==========================================
+    // 1. TẠO GIAO DIỆN RPG DOCK & CSS
+    // ==========================================
+    const style = document.createElement('style');
+    style.textContent = `
+        #rpg-dice-btn {
+            position: fixed;
+            bottom: 85px;
+            right: 25px;
+            width: 50px;
+            height: 50px;
+            background: #181825;
+            color: #fab387;
+            border: 2px solid #fab387;
+            border-radius: 50%;
+            cursor: pointer;
+            z-index: 999998;
+            box-shadow: 0 4px 15px rgba(250, 179, 135, 0.3);
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        #rpg-dice-btn:hover {
+            transform: scale(1.15) rotate(15deg);
+            background: #313244;
+        }
+
+        #rpg-panel {
+            display: none;
+            position: fixed;
+            bottom: 145px;
+            right: 25px;
+            width: 380px;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border: 1px solid #45475a;
+            border-radius: 12px;
+            z-index: 999999;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+            flex-direction: column;
+        }
+
+        .rpg-header {
+            background: #11111b;
+            padding: 12px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #313244;
+            font-weight: bold;
+            color: #fab387;
+        }
+
+        .rpg-content {
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .rpg-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .rpg-label {
+            font-size: 12px;
+            color: #a6adc8;
+            margin-bottom: 4px;
+        }
+
+        .rpg-input, .rpg-textarea {
+            width: 100%;
+            background: #313244;
+            border: 1px solid #45475a;
+            color: #fff;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            box-sizing: border-box;
+        }
+
+        .rpg-input:focus, .rpg-textarea:focus {
+            outline: none;
+            border-color: #fab387;
+        }
+
+        .rpg-dice-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+
+        .dice-tag {
+            background: #313244;
+            border: 1px solid #45475a;
+            color: #cdd6f4;
+            padding: 6px;
+            text-align: center;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 12px;
+            user-select: none;
+        }
+
+        .dice-tag.active {
+            background: #fab387;
+            color: #11111b;
+            border-color: #fab387;
+        }
+
+        .rpg-roll-btn {
+            background: linear-gradient(135deg, #fab387, #f38ba8);
+            color: #11111b;
+            border: none;
+            padding: 10px;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: opacity 0.2s;
+        }
+        .rpg-roll-btn:hover { opacity: 0.9; }
+
+        .rpg-result-box {
+            background: #11111b;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            border: 1px dashed #45475a;
+            min-height: 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .result-number {
+            font-size: 26px;
+            font-weight: 800;
+        }
+
+        .tier-crit-success { color: #a6e3a1; } /* Xanh lá */
+        .tier-success { color: #89b4fa; }      /* Xanh dương */
+        .tier-fail { color: #fab387; }         /* Cam */
+        .tier-crit-fail { color: #f38ba8; }    /* Đỏ */
+    `;
+    document.head.appendChild(style);
+
+    // ==========================================
+    // 2. LOGIC TÍNH ĐIỂM D&D MECHANICS
+    // ==========================================
+    let selectedSides = 20;
+
+    function roll(sides) {
+        return Math.floor(Math.random() * sides) + 1;
+    }
+
+    function evaluateRoll(diceRoll, sides, mod, dc) {
+        const total = diceRoll + mod;
+        let tier = '';
+        let tierClass = '';
+
+        if (sides === 20) {
+            if (diceRoll === 20) {
+                tier = 'CRITICAL SUCCESS (ĐẠI THÀNH CÔNG - Kỳ tích xảy ra!)';
+                tierClass = 'tier-crit-success';
+            } else if (diceRoll === 1) {
+                tier = 'CRITICAL FAILURE (ĐẠI THẤT BẠI - Hậu quả thảm khốc!)';
+                tierClass = 'tier-crit-fail';
+            } else if (total >= dc) {
+                tier = 'SUCCESS (THÀNH CÔNG)';
+                tierClass = 'tier-success';
+            } else {
+                tier = 'FAILURE (THẤT BẠI)';
+                tierClass = 'tier-fail';
+            }
+        } else {
+            if (total >= dc) {
+                tier = 'SUCCESS (THÀNH CÔNG)';
+                tierClass = 'tier-success';
+            } else {
+                tier = 'FAILURE (THẤT BẠI)';
+                tierClass = 'tier-fail';
+            }
+        }
+
+        return { total, tier, tierClass };
+    }
+
+    // ==========================================
+    // 3. TƯƠNG TÁC DOM VÀ INJECT PROMPT
+    // ==========================================
+    function injectIntoStudio(text) {
+        // Tìm textarea prompt của Google AI Studio (hỗ trợ nhiều selector)
+        const textarea = document.querySelector('textarea.mat-input-element, textarea[aria-label="Prompt box"], textarea');
+        if (!textarea) {
+            alert('Không tìm thấy khung chat của AI Studio! Hãy chắc chắn bạn đang ở trang Chat.');
+            return;
+        }
+
+        // Đẩy giá trị vào và kích hoạt event để Angular nhận diện
+        textarea.value = text;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+        textarea.focus();
+    }
+
+    // ==========================================
+    // 4. KHỞI TẠO PANEL GIAO DIỆN
+    // ==========================================
+    window.addEventListener('DOMContentLoaded', () => {
+        // Nút xúc xắc nổi
+        const fab = document.createElement('div');
+        fab.id = 'rpg-dice-btn';
+        fab.innerHTML = '🎲';
+        fab.title = 'Bảng Xúc Xắc Roleplay';
+        document.body.appendChild(fab);
+
+        // Panel điều khiển
+        const panel = document.createElement('div');
+        panel.id = 'rpg-panel';
+        panel.innerHTML = `
+            <div class="rpg-header">
+                <span>⚔️ RPG ACTION RESOLVER</span>
+                <span id="rpg-close" style="cursor:pointer; color:#f38ba8;">&times;</span>
+            </div>
+            <div class="rpg-content">
+                <div>
+                    <div class="rpg-label">Hành động của bạn:</div>
+                    <textarea id="rpg-action-text" class="rpg-textarea" rows="2" placeholder="Ví dụ: Lén bẻ khóa hòm đồ của tên quý tộc..."></textarea>
+                </div>
+
+                <div>
+                    <div class="rpg-label">Chọn Xúc Xắc:</div>
+                    <div class="rpg-dice-grid">
+                        <div class="dice-tag" data-sides="4">D4</div>
+                        <div class="dice-tag" data-sides="6">D6</div>
+                        <div class="dice-tag" data-sides="8">D8</div>
+                        <div class="dice-tag" data-sides="10">D10</div>
+                        <div class="dice-tag" data-sides="12">D12</div>
+                        <div class="dice-tag active" data-sides="20">D20</div>
+                        <div class="dice-tag" data-sides="100">D100</div>
+                    </div>
+                </div>
+
+                <div class="rpg-row">
+                    <div style="flex:1">
+                        <div class="rpg-label">Modifier (+/-):</div>
+                        <input type="number" id="rpg-mod" class="rpg-input" value="0">
+                    </div>
+                    <div style="flex:1">
+                        <div class="rpg-label">Độ khó (DC):</div>
+                        <input type="number" id="rpg-dc" class="rpg-input" value="12">
+                    </div>
+                </div>
+
+                <button id="rpg-do-roll" class="rpg-roll-btn">
+                    <span>Lắc Xúc Xắc & Tạo Prompt</span> 🎲
+                </button>
+
+                <div id="rpg-result-display" class="rpg-result-box" style="display:none;">
+                    <div class="rpg-label" id="rpg-calc-text">D20 (14) + 0</div>
+                    <div class="result-number" id="rpg-final-number">14</div>
+                    <div id="rpg-tier-text" style="font-weight:bold; font-size:12px;">SUCCESS</div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(panel);
+
+        // Events
+        fab.addEventListener('click', () => {
+            panel.style.display = (panel.style.display === 'flex') ? 'none' : 'flex';
+        });
+
+        document.getElementById('rpg-close').addEventListener('click', () => {
+            panel.style.display = 'none';
+        });
+
+        // Bắt sự kiện chọn mặt xúc xắc
+        const diceTags = panel.querySelectorAll('.dice-tag');
+        diceTags.forEach(tag => {
+            tag.addEventListener('click', () => {
+                diceTags.forEach(t => t.classList.remove('active'));
+                tag.classList.add('active');
+                selectedSides = parseInt(tag.getAttribute('data-sides'));
+            });
+        });
+
+        // Xử lý khi bấm Lắc
+        document.getElementById('rpg-do-roll').addEventListener('click', () => {
+            const actionText = document.getElementById('rpg-action-text').value.trim() || 'Thực hiện một hành động mang tính may rủi';
+            const mod = parseInt(document.getElementById('rpg-mod').value) || 0;
+            const dc = parseInt(document.getElementById('rpg-dc').value) || 10;
+
+            const diceRoll = roll(selectedSides);
+            const { total, tier, tierClass } = evaluateRoll(diceRoll, selectedSides, mod, dc);
+
+            // Cập nhật UI hiển thị kết quả
+            const resultBox = document.getElementById('rpg-result-display');
+            const calcText = document.getElementById('rpg-calc-text');
+            const finalNum = document.getElementById('rpg-final-number');
+            const tierText = document.getElementById('rpg-tier-text');
+
+            resultBox.style.display = 'flex';
+            calcText.textContent = `D${selectedSides} (Gốc: ${diceRoll}) + Bonus: ${mod} vs DC: ${dc}`;
+            finalNum.textContent = total;
+            tierText.textContent = tier;
+            tierText.className = tierClass;
+
+            // Xây dựng Prompt "bọc thép" cưỡng chế AI
+            const formattedPrompt = 
+`*Hành động của tôi:* ${actionText}
+
+[HỆ THỐNG RPG: KẾT QUẢ ĐỔ XÚC XẮC D&D]
+- Loại xúc xắc: D${selectedSides} (Đổ ra: ${diceRoll}) + Điểm cộng: ${mod} = Tổng: ${total} (Độ khó yêu cầu: ${dc})
+- Phân định: ${tier}
+===================================================
+*YÊU CẦU DÀNH CHO GAME MASTER (AI):* 
+1. Bạn BẮT BUỘC phải tiếp tục câu chuyện tuân thủ hoàn toàn kết quả: "${tier}".
+2. Nếu là THẤT BẠI hoặc ĐẠI THẤT BẠI: Miêu tả rõ ràng sai lầm, thương tật, tổn thất hoặc tình huống nguy hiểm ập tới, TUYỆT ĐỐI KHÔNG được tự ý "cứu" nhân vật hay biến thành thành công.
+3. Hãy miêu tả chi tiết cảm xúc và phản ứng của môi trường xung quanh.`;
+
+            // Bơm vào AI Studio
+            injectIntoStudio(formattedPrompt);
+        });
+    });
+
+})();
