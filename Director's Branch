@@ -1,0 +1,504 @@
+// ==UserScript==
+// @name         Google AI Studio: Director's Branch & Time Machine
+// @namespace    http://tampermonkey.net/
+// @version      1.0.0
+// @description  Hệ thống quản lý nhánh cốt truyện, Checkpoints và Lưu/Tải đa vũ trụ cho Roleplay trên Google AI Studio.
+// @author       You & AI Assistant
+// @match        https://aistudio.google.com/*
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ==========================================
+    // 1. DATA STRUCTURE & TIMELINE STORAGE
+    // ==========================================
+    const STORAGE_KEY = 'AISTUDIO_DIRECTOR_TIMELINES';
+
+    // Khởi tạo State ban đầu
+    let currentSession = {
+        activeBranchId: 'timeline-alpha',
+        branches: {
+            'timeline-alpha': {
+                id: 'timeline-alpha',
+                name: 'Dòng thời gian Chính (Alpha)',
+                createdAt: new Date().toLocaleTimeString(),
+                checkpoints: [] // Mảng chứa các snapshot { id, name, timestamp, contents, systemInstruction }
+            }
+        }
+    };
+
+    function loadState() {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+            try { currentSession = JSON.parse(raw); } catch (e) { console.error(e); }
+        }
+    }
+
+    function saveState() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(currentSession));
+    }
+
+    loadState();
+
+    // Biến tạm lưu lại payload hội thoại gần nhất bắt được từ API
+    let latestChatPayload = null;
+
+    // ==========================================
+    // 2. NETWORK INTERCEPTOR (CAPTURE CONVERSATION)
+    // ==========================================
+    const originalFetch = window.fetch;
+    window.fetch = async function (...args) {
+        const [resource, config] = args;
+
+        // Bắt trọn gói tin gửi đi chứa toàn bộ lịch sử chat của Gemini
+        if (typeof resource === 'string' && resource.includes(':generateContent') && config && config.body) {
+            try {
+                const payload = JSON.parse(config.body);
+                latestChatPayload = {
+                    contents: JSON.parse(JSON.stringify(payload.contents || [])),
+                    systemInstruction: payload.systemInstruction ? JSON.parse(JSON.stringify(payload.systemInstruction)) : null,
+                    timestamp: new Date().toLocaleTimeString(),
+                    turnCount: (payload.contents || []).length
+                };
+                
+                // Cập nhật số node hiển thị trên nút nổi
+                updateFabBadge();
+            } catch (err) {
+                console.error('[DirectorBranch] Lỗi bóc tách Payload:', err);
+            }
+        }
+
+        return originalFetch.apply(this, [resource, config]);
+    };
+
+    // ==========================================
+    // 3. UI STYLES (CYBERPUNK / SCI-FI THEME)
+    // ==========================================
+    const style = document.createElement('style');
+    style.textContent = `
+        #director-fab {
+            position: fixed;
+            bottom: 145px;
+            right: 25px;
+            width: 50px;
+            height: 50px;
+            background: #11111b;
+            color: #cba6f7;
+            border: 2px solid #cba6f7;
+            border-radius: 50%;
+            cursor: pointer;
+            z-index: 999997;
+            box-shadow: 0 4px 15px rgba(203, 166, 247, 0.4);
+            font-size: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+        #director-fab:hover {
+            transform: scale(1.1) rotate(-15deg);
+            background: #1e1e2e;
+        }
+
+        #director-drawer {
+            display: none;
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 440px;
+            height: 100vh;
+            background: #181825;
+            color: #cdd6f4;
+            border-left: 2px solid #313244;
+            z-index: 1000000;
+            box-shadow: -10px 0 30px rgba(0,0,0,0.8);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            flex-direction: column;
+            animation: slideIn 0.3s ease forwards;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+
+        .dir-header {
+            padding: 16px 20px;
+            background: #11111b;
+            border-bottom: 1px solid #313244;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .dir-title {
+            font-weight: 800;
+            font-size: 15px;
+            color: #cba6f7;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .dir-body {
+            padding: 16px;
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .branch-selector-box {
+            background: #1e1e2e;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #45475a;
+        }
+
+        .dir-select {
+            width: 100%;
+            background: #313244;
+            border: 1px solid #45475a;
+            color: #cdd6f4;
+            padding: 8px;
+            border-radius: 6px;
+            margin-top: 6px;
+            font-weight: bold;
+        }
+
+        .timeline-tree {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            position: relative;
+            padding-left: 20px;
+        }
+
+        .timeline-tree::before {
+            content: '';
+            position: absolute;
+            left: 7px;
+            top: 10px;
+            bottom: 10px;
+            width: 2px;
+            background: #45475a;
+        }
+
+        .checkpoint-node {
+            position: relative;
+            background: #1e1e2e;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            padding: 10px 14px;
+            transition: all 0.2s ease;
+        }
+
+        .checkpoint-node::after {
+            content: '';
+            position: absolute;
+            left: -19px;
+            top: 16px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #cba6f7;
+            box-shadow: 0 0 8px #cba6f7;
+        }
+
+        .checkpoint-node:hover {
+            border-color: #cba6f7;
+            transform: translateX(3px);
+        }
+
+        .node-meta {
+            font-size: 11px;
+            color: #a6adc8;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .node-title {
+            font-weight: bold;
+            font-size: 13px;
+            color: #89b4fa;
+        }
+
+        .node-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .dir-btn {
+            background: #313244;
+            color: #cdd6f4;
+            border: 1px solid #45475a;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .dir-btn:hover { background: #45475a; color: #fff; }
+
+        .btn-restore { background: #a6e3a1; color: #11111b; border: none; }
+        .btn-restore:hover { background: #94e2d5; }
+
+        .btn-fork { background: #f9e2af; color: #11111b; border: none; }
+        .btn-fork:hover { background: #fab387; }
+
+        .dir-footer {
+            padding: 14px 16px;
+            background: #11111b;
+            border-top: 1px solid #313244;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .action-main-btn {
+            background: #cba6f7;
+            color: #11111b;
+            border: none;
+            padding: 10px;
+            border-radius: 8px;
+            font-weight: 800;
+            cursor: pointer;
+            text-align: center;
+        }
+        .action-main-btn:hover { opacity: 0.9; }
+    `;
+    document.head.appendChild(style);
+
+    function updateFabBadge() {
+        const fab = document.getElementById('director-fab');
+        if (fab && latestChatPayload) {
+            fab.title = `Đã bắt được ${latestChatPayload.turnCount} lượt chat gần nhất. Nhấp để quản lý timeline!`;
+        }
+    }
+
+    // ==========================================
+    // 4. UI CREATION & EVENT HANDLERS
+    // ==========================================
+    window.addEventListener('DOMContentLoaded', () => {
+        // Nút biểu tượng cỗ máy thời gian
+        const fab = document.createElement('div');
+        fab.id = 'director-fab';
+        fab.innerHTML = '⏳';
+        fab.title = 'Director\'s Branch: Cỗ Máy Thời Gian & Nhánh Kịch Bản';
+        document.body.appendChild(fab);
+
+        // Sidebar Drawer
+        const drawer = document.createElement('div');
+        drawer.id = 'director-drawer';
+        drawer.innerHTML = `
+            <div class="dir-header">
+                <div class="dir-title">
+                    <span>🌌 DIRECTOR'S BRANCH</span>
+                </div>
+                <span id="dir-close" style="cursor:pointer; font-size:22px; color:#f38ba8;">&times;</span>
+            </div>
+
+            <div class="dir-body">
+                <div class="branch-selector-box">
+                    <label style="font-size:11px; color:#a6adc8; font-weight:bold;">ĐA VŨ TRỤ / NHÁNH ĐANG CHỌN:</label>
+                    <select id="dir-branch-select" class="dir-select"></select>
+                    <div style="display:flex; gap:6px; margin-top:8px;">
+                        <button class="dir-btn" id="dir-new-branch-btn" style="flex:1;">+ Tạo Nhánh Mới</button>
+                    </div>
+                </div>
+
+                <div>
+                    <label style="font-size:12px; font-weight:bold; color:#a6adc8; display:block; margin-bottom:10px;">
+                        CÁC CHECKPOINT TRÊN NHÁNH NÀY:
+                    </label>
+                    <div class="timeline-tree" id="dir-checkpoint-list">
+                        <!-- Node checkpoints sẽ render ở đây -->
+                    </div>
+                </div>
+            </div>
+
+            <div class="dir-footer">
+                <button class="action-main-btn" id="dir-save-cp-btn">
+                    💾 Tạo Checkpoint Tại Thời Điểm Này
+                </button>
+            </div>
+        `;
+        document.body.appendChild(drawer);
+
+        // Events toggle UI
+        fab.addEventListener('click', () => {
+            drawer.style.display = (drawer.style.display === 'flex') ? 'none' : 'flex';
+            renderBranches();
+            renderCheckpoints();
+        });
+
+        document.getElementById('dir-close').addEventListener('click', () => {
+            drawer.style.display = 'none';
+        });
+
+        // Đổi Branch
+        document.getElementById('dir-branch-select').addEventListener('change', (e) => {
+            currentSession.activeBranchId = e.target.value;
+            saveState();
+            renderCheckpoints();
+        });
+
+        // Tạo nhánh mới trống
+        document.getElementById('dir-new-branch-btn').addEventListener('click', () => {
+            const name = prompt('Nhập tên cho Đa vũ trụ / Nhánh kịch bản mới:', 'Nhánh: ');
+            if (!name) return;
+            const newId = 'branch-' + Date.now();
+            currentSession.branches[newId] = {
+                id: newId,
+                name: name,
+                createdAt: new Date().toLocaleTimeString(),
+                checkpoints: []
+            };
+            currentSession.activeBranchId = newId;
+            saveState();
+            renderBranches();
+            renderCheckpoints();
+        });
+
+        // Lưu Checkpoint mới từ hội thoại hiện tại
+        document.getElementById('dir-save-cp-btn').addEventListener('click', () => {
+            if (!latestChatPayload || !latestChatPayload.contents || latestChatPayload.contents.length === 0) {
+                alert('Chưa có dữ liệu hội thoại nào được phát sinh! Hãy chat ít nhất một câu với AI để tạo Checkpoint.');
+                return;
+            }
+
+            const title = prompt('Đặt tên cho điểm lưu (Checkpoint) này:', `Hồi ${latestChatPayload.turnCount} - Sự kiện quan trọng`);
+            if (!title) return;
+
+            const activeBranch = currentSession.branches[currentSession.activeBranchId];
+            activeBranch.checkpoints.push({
+                id: 'cp-' + Date.now(),
+                title: title,
+                timestamp: new Date().toLocaleTimeString(),
+                turnCount: latestChatPayload.turnCount,
+                data: JSON.parse(JSON.stringify(latestChatPayload))
+            });
+
+            saveState();
+            renderCheckpoints();
+        });
+    });
+
+    // ==========================================
+    // 5. RENDER & RESTORE ACTIONS
+    // ==========================================
+    function renderBranches() {
+        const select = document.getElementById('dir-branch-select');
+        select.innerHTML = '';
+        Object.values(currentSession.branches).forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.id;
+            opt.textContent = b.name;
+            if (b.id === currentSession.activeBranchId) opt.selected = true;
+            select.appendChild(opt);
+        });
+    }
+
+    function renderCheckpoints() {
+        const container = document.getElementById('dir-checkpoint-list');
+        container.innerHTML = '';
+        const activeBranch = currentSession.branches[currentSession.activeBranchId];
+
+        if (!activeBranch || activeBranch.checkpoints.length === 0) {
+            container.innerHTML = `<div style="font-size:12px; color:#6c7086; font-style:italic;">Chưa có Checkpoint nào được lưu trên nhánh này. Bấm nút bên dưới để tạo mốc lưu đầu tiên!</div>`;
+            return;
+        }
+
+        activeBranch.checkpoints.forEach((cp, index) => {
+            const node = document.createElement('div');
+            node.className = 'checkpoint-node';
+            node.innerHTML = `
+                <div class="node-meta">
+                    <span>Mốc #${index + 1} (${cp.turnCount} turns)</span>
+                    <span>${cp.timestamp}</span>
+                </div>
+                <div class="node-title">${cp.title}</div>
+                <div class="node-actions">
+                    <button class="dir-btn btn-restore" data-id="${cp.id}">↩ Tải Lại Lịch Sử</button>
+                    <button class="dir-btn btn-fork" data-id="${cp.id}">🌿 Rẽ Nhánh Tại Đây</button>
+                    <button class="dir-btn" style="color:#f38ba8;" data-del="${cp.id}">Xóa</button>
+                </div>
+            `;
+
+            // Tải lại Checkpoint (Xuất file JSON chuẩn format AI Studio để import 1-click)
+            node.querySelector('.btn-restore').addEventListener('click', () => {
+                restoreCheckpoint(cp);
+            });
+
+            // Tách thành một Timeline mới ngay từ node này
+            node.querySelector('.btn-fork').addEventListener('click', () => {
+                forkFromCheckpoint(cp);
+            });
+
+            // Xóa checkpoint
+            node.querySelector('[data-del]').addEventListener('click', () => {
+                if (confirm(`Bạn có chắc muốn xóa điểm lưu "${cp.title}"?`)) {
+                    activeBranch.checkpoints = activeBranch.checkpoints.filter(item => item.id !== cp.id);
+                    saveState();
+                    renderCheckpoints();
+                }
+            });
+
+            container.appendChild(node);
+        });
+    }
+
+    // Tách dòng thời gian (Fork)
+    function forkFromCheckpoint(cp) {
+        const forkName = prompt(`Tạo một nhánh mới rẽ ra từ mốc: "${cp.title}"`, `${cp.title} (Nếu như...)`);
+        if (!forkName) return;
+
+        const newId = 'branch-' + Date.now();
+        // Nhánh mới được thừa hưởng toàn bộ checkpoint từ điểm đó trở về trước
+        const activeBranch = currentSession.branches[currentSession.activeBranchId];
+        const cpIndex = activeBranch.checkpoints.findIndex(item => item.id === cp.id);
+        const inheritedCheckpoints = activeBranch.checkpoints.slice(0, cpIndex + 1);
+
+        currentSession.branches[newId] = {
+            id: newId,
+            name: forkName,
+            createdAt: new Date().toLocaleTimeString(),
+            checkpoints: JSON.parse(JSON.stringify(inheritedCheckpoints))
+        };
+        currentSession.activeBranchId = newId;
+
+        saveState();
+        renderBranches();
+        renderCheckpoints();
+        alert(`Đã rẽ nhánh thành công sang vũ trụ: "${forkName}"!`);
+    }
+
+    // Phục hồi: Xuất file JSON đồng thời copy tóm tắt vào Clipboard
+    function restoreCheckpoint(cp) {
+        // Xuất file Prompt dạng JSON để bạn có thể bấm nút "Open" trên AI Studio load vào ngay
+        const exportFormat = {
+            clientContent: {
+                systemInstruction: cp.data.systemInstruction,
+                contents: cp.data.contents
+            }
+        };
+
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportFormat, null, 2));
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", dataStr);
+        downloadAnchor.setAttribute("download", `Timeline_${cp.title.replace(/\s+/g, '_')}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+
+        alert(`Đã tạo file Checkpoint "${cp.title}.json"!\n\nCách áp dụng: Trên góc trên giao diện AI Studio, chọn biểu tượng Folder (Open Prompt) -> Chọn file vừa tải về để khôi phục toàn bộ tiến trình chat sạch sẽ 100%.`);
+    }
+
+})();
